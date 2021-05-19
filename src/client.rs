@@ -6,7 +6,9 @@ use reqwest::blocking::Response;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT, CONTENT_TYPE};
 use sha2::Sha256;
 use serde::de::DeserializeOwned;
-use crate::api::API;
+use crate::api::{API, Spot};
+use std::cell::Cell;
+use crate::model::ExchangeInformation;
 
 #[derive(Clone)]
 pub struct Client {
@@ -14,6 +16,8 @@ pub struct Client {
     secret_key: String,
     host: String,
     inner_client: reqwest::blocking::Client,
+    current_weight: Cell<u32>,
+    req_weight_limit: Cell<u32>
 }
 
 impl Client {
@@ -27,7 +31,29 @@ impl Client {
                 .pool_idle_timeout(None)
                 .build()
                 .unwrap(),
+            current_weight: Cell::new(0),
+            req_weight_limit: Cell::new(0),
         }
+    }
+
+    pub fn get_current_weight(&self) -> u32
+    {
+        self.current_weight.get()
+    }
+
+    pub fn get_req_weight_limit(&self) -> u32
+    {
+        if self.req_weight_limit.get() == 0 {
+            let res: Result<ExchangeInformation> = self.get(API::Spot(Spot::ExchangeInfo), None);
+            let limits = res.unwrap().rate_limits;
+            for limit in limits {
+                if limit.rate_limit_type == "REQUEST_WEIGHT" {
+                    self.req_weight_limit.set(limit.limit as u32);
+                    break;
+                }
+            }
+        }
+        self.req_weight_limit.get()
     }
 
     pub fn get_signed<T: DeserializeOwned>(&self, endpoint: API, request: Option<String>) -> Result<T> {
@@ -155,6 +181,10 @@ impl Client {
     }
 
     fn handler<T: DeserializeOwned>(&self, response: Response) -> Result<T> {
+
+        let w = response.headers()["X-MBX-USED-WEIGHT"].to_str().unwrap().parse();
+        self.current_weight.set(w.unwrap());
+
         match response.status() {
             StatusCode::OK => {
                 Ok(response.json::<T>()?)
